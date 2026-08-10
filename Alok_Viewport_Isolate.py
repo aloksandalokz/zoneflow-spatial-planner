@@ -15,10 +15,6 @@ _DLL = None
 ERROR_TEXT = {
     -1: "Invalid viewport/selection data.",
     -2: "3ds Max node display control is unavailable.",
-    -3: (
-        "Another viewport-display utility currently owns 3ds Max's node display callback.\n\n"
-        "Close/restore that utility first, then try again."
-    ),
     -4: "3ds Max refused to activate the viewport display callback.",
 }
 
@@ -31,7 +27,7 @@ def _load_dll():
     if not DLL_PATH.exists():
         raise FileNotFoundError(
             "AlokViewportIsolate.dll is missing.\n\n"
-            "Download the READY artifact from the GitHub Actions build and keep the DLL beside this Python file."
+            "Keep the compiled DLL beside this Python file."
         )
 
     dll = ctypes.WinDLL(str(DLL_PATH))
@@ -47,8 +43,6 @@ def _load_dll():
     dll.AlokVP_IsActive.restype = ctypes.c_int
     dll.AlokVP_TargetViewID.argtypes = []
     dll.AlokVP_TargetViewID.restype = ctypes.c_int
-
-    # Diagnostics exported by v2 of the native bridge.
     dll.AlokVP_ExCallCount.argtypes = []
     dll.AlokVP_ExCallCount.restype = ctypes.c_uint64
     dll.AlokVP_LegacyCallCount.argtypes = []
@@ -57,7 +51,8 @@ def _load_dll():
     dll.AlokVP_SuppressedCount.restype = ctypes.c_uint64
     dll.AlokVP_LastSeenViewID.argtypes = []
     dll.AlokVP_LastSeenViewID.restype = ctypes.c_int
-
+    dll.AlokVP_HasPreviousCallback.argtypes = []
+    dll.AlokVP_HasPreviousCallback.restype = ctypes.c_int
     _DLL = dll
     return dll
 
@@ -77,8 +72,6 @@ def _selected_handles():
 
 
 def _force_redraw():
-    # A complete redraw is intentional here: node display callbacks can otherwise
-    # remain cached by Nitrous until the viewport is dirtied for another reason.
     try:
         rt.completeRedraw()
     except Exception:
@@ -90,7 +83,6 @@ def isolate_active_viewport():
     if not handles:
         raise RuntimeError("Select the object(s) you want to keep visible first.")
 
-    # activeViewportID is the persistent viewport ID, matching ViewExp::GetViewID().
     view_id = int(rt.viewport.activeViewportID)
     array_type = ctypes.c_uint64 * len(handles)
     handle_array = array_type(*handles)
@@ -118,6 +110,7 @@ def diagnostics():
         "suppressed": int(dll.AlokVP_SuppressedCount()),
         "seen_view": int(dll.AlokVP_LastSeenViewID()),
         "target_view": int(dll.AlokVP_TargetViewID()),
+        "chained": bool(dll.AlokVP_HasPreviousCallback()),
     }
 
 
@@ -127,7 +120,7 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
         self.setWindowTitle("VP ISOLATE")
         self.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.WindowStaysOnTopHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
-        self.setFixedWidth(260)
+        self.setFixedWidth(270)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(9, 9, 9, 9)
@@ -135,11 +128,6 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
 
         self.isolate_btn = QtWidgets.QPushButton("ISOLATE THIS VIEWPORT")
         self.isolate_btn.setMinimumHeight(46)
-        self.isolate_btn.setToolTip(
-            "Keep the current selection visible only in the ACTIVE viewport.\n"
-            "Other viewports remain full."
-        )
-
         self.restore_btn = QtWidgets.QPushButton("RESTORE THIS VIEWPORT")
         self.restore_btn.setMinimumHeight(38)
 
@@ -207,12 +195,11 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
     def _refresh_diagnostics(self):
         try:
             d = diagnostics()
+            chain = " • chained" if d["chained"] else ""
             self.debug.setText(
-                f"EX {d['ex']}  •  hidden draws {d['suppressed']}  •  "
-                f"seen VP {d['seen_view']} / target {d['target_view']}"
+                f"EX {d['ex']} • hidden {d['suppressed']} • "
+                f"seen VP {d['seen_view']} / target {d['target_view']}{chain}"
             )
-
-            # If EX calls stay at zero, Max is not discovering the Ex interface.
             if d["ex"] == 0 and d["legacy"] > 0:
                 self.status.setText("Legacy callback detected — EX interface not active")
         except Exception:
