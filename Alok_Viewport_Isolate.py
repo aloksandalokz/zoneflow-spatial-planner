@@ -47,6 +47,17 @@ def _load_dll():
     dll.AlokVP_IsActive.restype = ctypes.c_int
     dll.AlokVP_TargetViewID.argtypes = []
     dll.AlokVP_TargetViewID.restype = ctypes.c_int
+
+    # Diagnostics exported by v2 of the native bridge.
+    dll.AlokVP_ExCallCount.argtypes = []
+    dll.AlokVP_ExCallCount.restype = ctypes.c_uint64
+    dll.AlokVP_LegacyCallCount.argtypes = []
+    dll.AlokVP_LegacyCallCount.restype = ctypes.c_uint64
+    dll.AlokVP_SuppressedCount.argtypes = []
+    dll.AlokVP_SuppressedCount.restype = ctypes.c_uint64
+    dll.AlokVP_LastSeenViewID.argtypes = []
+    dll.AlokVP_LastSeenViewID.restype = ctypes.c_int
+
     _DLL = dll
     return dll
 
@@ -65,11 +76,21 @@ def _selected_handles():
     return handles
 
 
+def _force_redraw():
+    # A complete redraw is intentional here: node display callbacks can otherwise
+    # remain cached by Nitrous until the viewport is dirtied for another reason.
+    try:
+        rt.completeRedraw()
+    except Exception:
+        rt.redrawViews()
+
+
 def isolate_active_viewport():
     handles = _selected_handles()
     if not handles:
         raise RuntimeError("Select the object(s) you want to keep visible first.")
 
+    # activeViewportID is the persistent viewport ID, matching ViewExp::GetViewID().
     view_id = int(rt.viewport.activeViewportID)
     array_type = ctypes.c_uint64 * len(handles)
     handle_array = array_type(*handles)
@@ -78,7 +99,7 @@ def isolate_active_viewport():
     if result != 1:
         raise RuntimeError(ERROR_TEXT.get(result, f"Native bridge error: {result}"))
 
-    rt.redrawViews()
+    _force_redraw()
     return view_id, len(handles)
 
 
@@ -86,7 +107,18 @@ def restore_viewport():
     result = _load_dll().AlokVP_Restore()
     if result != 1:
         raise RuntimeError(f"Native bridge error: {result}")
-    rt.redrawViews()
+    _force_redraw()
+
+
+def diagnostics():
+    dll = _load_dll()
+    return {
+        "ex": int(dll.AlokVP_ExCallCount()),
+        "legacy": int(dll.AlokVP_LegacyCallCount()),
+        "suppressed": int(dll.AlokVP_SuppressedCount()),
+        "seen_view": int(dll.AlokVP_LastSeenViewID()),
+        "target_view": int(dll.AlokVP_TargetViewID()),
+    }
 
 
 class ViewportIsolatePalette(QtWidgets.QDialog):
@@ -95,7 +127,7 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
         self.setWindowTitle("VP ISOLATE")
         self.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.WindowStaysOnTopHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
-        self.setFixedWidth(242)
+        self.setFixedWidth(260)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(9, 9, 9, 9)
@@ -116,6 +148,11 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
         self.status.setWordWrap(True)
         self.status.setMinimumHeight(28)
 
+        self.debug = QtWidgets.QLabel("")
+        self.debug.setAlignment(QtCore.Qt.AlignCenter)
+        self.debug.setWordWrap(True)
+        self.debug.setStyleSheet("font-size: 9px; color: #a0a0a0;")
+
         safety = QtWidgets.QLabel("VIEWPORT ONLY • RENDERABLE UNTOUCHED")
         safety.setAlignment(QtCore.Qt.AlignCenter)
         safety.setStyleSheet("font-size: 9px; color: #8c8c8c;")
@@ -123,6 +160,7 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
         layout.addWidget(self.isolate_btn)
         layout.addWidget(self.restore_btn)
         layout.addWidget(self.status)
+        layout.addWidget(self.debug)
         layout.addWidget(safety)
 
         self.isolate_btn.clicked.connect(self._on_isolate)
@@ -133,6 +171,10 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
         self.restore_btn.setStyleSheet(
             "QPushButton { font-weight: 600; padding: 6px; }"
         )
+
+        self.diag_timer = QtCore.QTimer(self)
+        self.diag_timer.setInterval(400)
+        self.diag_timer.timeout.connect(self._refresh_diagnostics)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -148,24 +190,45 @@ class ViewportIsolatePalette(QtWidgets.QDialog):
         self.move(max(frame.x(), x), max(frame.y(), y))
 
     def _message_error(self, text):
+        self.diag_timer.stop()
         self.status.setText("Not isolated")
+        self.debug.setText("")
         QtWidgets.QMessageBox.warning(self, "VP ISOLATE", str(text))
 
     def _on_isolate(self):
         try:
             view_id, count = isolate_active_viewport()
             self.status.setText(f"Viewport {view_id} • {count} object(s) isolated")
+            self.diag_timer.start()
+            QtCore.QTimer.singleShot(100, self._refresh_diagnostics)
         except Exception as exc:
             self._message_error(exc)
+
+    def _refresh_diagnostics(self):
+        try:
+            d = diagnostics()
+            self.debug.setText(
+                f"EX {d['ex']}  •  hidden draws {d['suppressed']}  •  "
+                f"seen VP {d['seen_view']} / target {d['target_view']}"
+            )
+
+            # If EX calls stay at zero, Max is not discovering the Ex interface.
+            if d["ex"] == 0 and d["legacy"] > 0:
+                self.status.setText("Legacy callback detected — EX interface not active")
+        except Exception:
+            pass
 
     def _on_restore(self):
         try:
             restore_viewport()
+            self.diag_timer.stop()
             self.status.setText("Full scene restored")
+            self.debug.setText("")
         except Exception as exc:
             self._message_error(exc)
 
     def closeEvent(self, event):
+        self.diag_timer.stop()
         try:
             if _DLL is not None and _DLL.AlokVP_IsActive():
                 restore_viewport()
