@@ -26,23 +26,38 @@ namespace
     std::atomic<int>  g_targetViewID{-1};
     std::atomic<bool> g_isolationActive{false};
 
-    // Runtime diagnostics. These let the Python palette prove that 3ds Max is
-    // actually calling the viewport-aware callback rather than the legacy one.
     std::atomic<std::uint64_t> g_exCalls{0};
     std::atomic<std::uint64_t> g_legacyCalls{0};
     std::atomic<std::uint64_t> g_suppressedCalls{0};
     std::atomic<int> g_lastSeenViewID{-1};
 
     INodeDisplayControl* g_displayControl = nullptr;
+    NodeDisplayCallback* g_previousCallback = nullptr;
     bool g_registered = false;
+
+    bool IsSuppressedInTargetViewport(ViewExp* vpt, INode* node)
+    {
+        if (!g_isolationActive.load(std::memory_order_acquire))
+            return false;
+
+        if (vpt == nullptr || node == nullptr || node->IsRootNode())
+            return false;
+
+        if (vpt->GetViewID() != g_targetViewID.load(std::memory_order_relaxed))
+            return false;
+
+        const auto handles = std::atomic_load_explicit(
+            &g_visibleHandles, std::memory_order_acquire);
+
+        const auto nodeHandle =
+            static_cast<std::uint64_t>(Animatable::GetHandleByAnim(node));
+
+        return handles->find(nodeHandle) == handles->end();
+    }
 
     class AlokViewportDisplayCallback final : public NodeDisplayCallbackEx
     {
     public:
-        // CRITICAL: BaseInterface::GetInterface() returns NULL by default.
-        // 3ds Max asks the callback for IID_NODE_DISPLAY_CALLBACK_EX before it
-        // will call the overload that contains ViewExp*. Return the direct
-        // BaseInterface subobject for that ID so Max can discover Ex support.
         BaseInterface* GetInterface(Interface_ID id) override
         {
             if (id == IID_NODE_DISPLAY_CALLBACK_EX)
@@ -60,59 +75,81 @@ namespace
             return noRelease;
         }
 
-        void StartDisplay(TimeValue, ViewExp*, int) override {}
-        void EndDisplay(TimeValue, ViewExp*, int) override {}
-
-        bool Display(TimeValue, ViewExp*, int, INode*, Object*) override
+        void StartDisplay(TimeValue t, ViewExp* vpt, int flags) override
         {
-            // We do not draw replacement geometry. Normal drawing is controlled
-            // by SuspendObjectDisplay().
+            if (g_previousCallback != nullptr)
+                g_previousCallback->StartDisplay(t, vpt, flags);
+        }
+
+        void EndDisplay(TimeValue t, ViewExp* vpt, int flags) override
+        {
+            if (g_previousCallback != nullptr)
+                g_previousCallback->EndDisplay(t, vpt, flags);
+        }
+
+        bool Display(TimeValue t, ViewExp* vpt, int flags, INode* node, Object* pObj) override
+        {
+            if (IsSuppressedInTargetViewport(vpt, node))
+                return false;
+
+            if (g_previousCallback != nullptr)
+                return g_previousCallback->Display(t, vpt, flags, node, pObj);
+
             return false;
         }
 
-        // Legacy path has no viewport context. Never suppress here because doing
-        // so would hide objects in every viewport.
-        bool SuspendObjectDisplay(TimeValue, INode*) override
+        bool SuspendObjectDisplay(TimeValue t, INode* node) override
         {
             g_legacyCalls.fetch_add(1, std::memory_order_relaxed);
+
+            // No viewport context is available here, so this tool itself never
+            // suppresses via the legacy path. Preserve any pre-existing callback.
+            if (g_previousCallback != nullptr)
+                return g_previousCallback->SuspendObjectDisplay(t, node);
+
             return false;
         }
 
-        // Viewport-aware path. Only the target viewport is affected.
-        bool SuspendObjectDisplay(TimeValue, ViewExp* vpt, INode* node, Object*) override
+        bool SuspendObjectDisplay(TimeValue t, ViewExp* vpt, INode* node, Object* pObj) override
         {
             g_exCalls.fetch_add(1, std::memory_order_relaxed);
 
             if (vpt != nullptr)
                 g_lastSeenViewID.store(vpt->GetViewID(), std::memory_order_relaxed);
 
-            if (!g_isolationActive.load(std::memory_order_acquire))
-                return false;
+            bool previousSuppress = false;
+            if (g_previousCallback != nullptr)
+            {
+                // Preserve the existing callback's normal suppression behavior.
+                // The base callback API exposes the legacy decision reliably;
+                // our own per-viewport decision is added on top of it.
+                previousSuppress = g_previousCallback->SuspendObjectDisplay(t, node);
+            }
 
-            if (vpt == nullptr || node == nullptr || node->IsRootNode())
-                return false;
-
-            if (vpt->GetViewID() != g_targetViewID.load(std::memory_order_relaxed))
-                return false;
-
-            const auto handles = std::atomic_load_explicit(
-                &g_visibleHandles, std::memory_order_acquire);
-
-            const auto nodeHandle =
-                static_cast<std::uint64_t>(Animatable::GetHandleByAnim(node));
-
-            const bool suppress = handles->find(nodeHandle) == handles->end();
-            if (suppress)
+            const bool ourSuppress = IsSuppressedInTargetViewport(vpt, node);
+            if (ourSuppress)
                 g_suppressedCalls.fetch_add(1, std::memory_order_relaxed);
 
-            return suppress;
+            return previousSuppress || ourSuppress;
         }
 
-        void AddNodeCallbackBox(TimeValue, INode*, ViewExp*, Box3&, Object*) override {}
+        void AddNodeCallbackBox(TimeValue t, INode* node, ViewExp* vpt, Box3& box, Object* pObj) override
+        {
+            if (g_previousCallback != nullptr && !IsSuppressedInTargetViewport(vpt, node))
+                g_previousCallback->AddNodeCallbackBox(t, node, vpt, box, pObj);
+        }
 
         bool HitTest(
-            TimeValue, INode*, int, int, int, IPoint2*, ViewExp*, Object*) override
+            TimeValue t, INode* node, int type, int crossing, int flags,
+            IPoint2* p, ViewExp* vpt, Object* pObj) override
         {
+            if (IsSuppressedInTargetViewport(vpt, node))
+                return false;
+
+            if (g_previousCallback != nullptr)
+                return g_previousCallback->HitTest(
+                    t, node, type, crossing, flags, p, vpt, pObj);
+
             return false;
         }
 
@@ -170,23 +207,39 @@ namespace
 
         NodeDisplayCallback* current = control->GetNodeCallback();
 
-        // Do not steal the global display hook from another active utility.
-        if (current != nullptr && current != &g_callback)
-            return -3;
-
-        if (!g_registered)
+        if (current != &g_callback)
         {
-            control->RegisterNodeDisplayCallback(&g_callback);
-            g_registered = true;
-        }
+            // Remember whatever Max / another utility is currently using.
+            // We forward its drawing behavior while isolated and restore it later.
+            g_previousCallback = current;
 
-        if (control->GetNodeCallback() != &g_callback)
-        {
+            if (!g_registered)
+            {
+                control->RegisterNodeDisplayCallback(&g_callback);
+                g_registered = true;
+            }
+
             if (!control->SetNodeCallback(&g_callback))
                 return -4;
         }
 
         return 1;
+    }
+
+    void RestorePreviousCallback()
+    {
+        auto* control = GetDisplayControl();
+        if (control == nullptr)
+            return;
+
+        if (control->GetNodeCallback() == &g_callback)
+        {
+            // Restore the callback that was active before this tool took control.
+            // Passing nullptr is valid for returning to no active callback.
+            control->SetNodeCallback(g_previousCallback);
+        }
+
+        g_previousCallback = nullptr;
     }
 }
 
@@ -235,6 +288,7 @@ extern "C"
             std::make_shared<const HandleSet>(),
             std::memory_order_release);
 
+        RestorePreviousCallback();
         InvalidateDisplay();
         return 1;
     }
@@ -273,6 +327,12 @@ extern "C"
     int AlokVP_LastSeenViewID()
     {
         return g_lastSeenViewID.load(std::memory_order_relaxed);
+    }
+
+    __declspec(dllexport)
+    int AlokVP_HasPreviousCallback()
+    {
+        return g_previousCallback != nullptr ? 1 : 0;
     }
 }
 
