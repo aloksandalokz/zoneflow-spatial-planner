@@ -1,3 +1,4 @@
+# Repackage trigger: include latest Python diagnostics UI with corrected native DLL.
 cmake_minimum_required(VERSION 3.20)
 project(AlokViewportIsolate LANGUAGES CXX)
 
