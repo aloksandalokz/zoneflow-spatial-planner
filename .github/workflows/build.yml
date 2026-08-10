@@ -1,0 +1,135 @@
+name: Build 3ds Max 2026 VP Isolate DLL
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "AlokViewportIsolate.cpp"
+      - "CMakeLists.txt"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Autodesk 3ds Max 2026 SDK
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://autodesk-adn-transfer.s3.us-west-2.amazonaws.com/ADN+Extranet/M%26E/Max/Autodesk+3ds+Max+2026/SDK_3dsMax2026.msi"
+          $msi = Join-Path $env:RUNNER_TEMP "SDK_3dsMax2026.msi"
+          Write-Host "Downloading official Autodesk SDK..."
+          Invoke-WebRequest -Uri $url -OutFile $msi
+          if (!(Test-Path $msi)) { throw "SDK download failed." }
+          Write-Host "Downloaded: $msi"
+
+      - name: Install SDK on temporary GitHub runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $msi = Join-Path $env:RUNNER_TEMP "SDK_3dsMax2026.msi"
+          $p = Start-Process msiexec.exe -ArgumentList @(
+            "/i", "`"$msi`"",
+            "/qn",
+            "/norestart"
+          ) -Wait -PassThru
+
+          if ($p.ExitCode -ne 0) {
+            throw "Autodesk SDK installer returned exit code $($p.ExitCode)"
+          }
+
+      - name: Find SDK
+        id: sdk
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidateRoots = @(
+            "C:\Program Files\Autodesk\3ds Max 2026 SDK\maxsdk",
+            "C:\Program Files\Autodesk\3ds Max 2026 SDK"
+          )
+
+          $sdk = $null
+          foreach ($root in $candidateRoots) {
+            if (Test-Path (Join-Path $root "include\max.h")) {
+              $sdk = $root
+              break
+            }
+          }
+
+          if (-not $sdk) {
+            $maxh = Get-ChildItem "C:\Program Files\Autodesk" -Filter max.h -Recurse -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+            if ($maxh) {
+              $sdk = Split-Path (Split-Path $maxh.FullName -Parent) -Parent
+            }
+          }
+
+          if (-not $sdk) {
+            throw "max.h was not found after SDK installation."
+          }
+
+          Write-Host "SDK root: $sdk"
+          "sdk_root=$sdk" >> $env:GITHUB_OUTPUT
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DMAXSDK_ROOT="${{ steps.sdk.outputs.sdk_root }}"
+
+      - name: Build Release DLL
+        shell: powershell
+        run: |
+          cmake --build build --config Release --verbose
+
+      - name: Verify DLL
+        shell: powershell
+        run: |
+          $dll = "build\Release\AlokViewportIsolate.dll"
+          if (!(Test-Path $dll)) {
+            throw "DLL was not created."
+          }
+          Get-Item $dll | Format-List FullName,Length,LastWriteTime
+
+      - name: Package ready-to-use files
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path ReadyToUse | Out-Null
+          Copy-Item "build\Release\AlokViewportIsolate.dll" "ReadyToUse\"
+          Copy-Item "Alok_Viewport_Isolate.py" "ReadyToUse\"
+          Copy-Item "Launch_Alok_Viewport_Isolate.ms" "ReadyToUse\"
+
+          @"
+          ALOK VP ISOLATE - READY TO USE
+          ==============================
+
+          No administrator rights required.
+
+          1. Extract this folder anywhere you can write, for example:
+             Documents\Alok_VP_Isolate
+
+          2. Keep these 3 files together:
+             AlokViewportIsolate.dll
+             Alok_Viewport_Isolate.py
+             Launch_Alok_Viewport_Isolate.ms
+
+          3. In 3ds Max 2026:
+             Scripting > Run Script
+             Run Launch_Alok_Viewport_Isolate.ms
+
+          Nothing is installed into Program Files.
+          Renderable is never changed.
+          "@ | Set-Content "ReadyToUse\README.txt"
+
+      - name: Upload ready-to-use package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Alok-VP-Isolate-3dsMax2026-READY
+          path: ReadyToUse
+          if-no-files-found: error
