@@ -17,10 +17,20 @@ add_library(AlokViewportIsolate SHARED
 
 target_compile_features(AlokViewportIsolate PRIVATE cxx_std_17)
 
+target_compile_definitions(AlokViewportIsolate PRIVATE
+    UNICODE
+    _UNICODE
+    NOMINMAX
+)
+
 if(MSVC)
     set_property(TARGET AlokViewportIsolate PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-    target_compile_options(AlokViewportIsolate PRIVATE /permissive- /EHsc)
+    target_compile_options(AlokViewportIsolate PRIVATE
+        /permissive-
+        /EHsc
+        /U_MBCS
+    )
 endif()
 
 target_include_directories(AlokViewportIsolate PRIVATE

@@ -1,3 +1,12 @@
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
@@ -25,9 +34,7 @@ namespace
     public:
         BaseInterface* GetInterface(Interface_ID id) override
         {
-            if (id == IID_NODE_DISPLAY_CALLBACK_EX)
-                return static_cast<NodeDisplayCallbackEx*>(this);
-            return NodeDisplayCallbackEx::GetInterface(id);
+            return BaseInterface::GetInterface(id);
         }
 
         Interface_ID GetID() override
@@ -48,11 +55,14 @@ namespace
             return false;
         }
 
+        // The legacy overload has no viewport context, so never suppress here.
         bool SuspendObjectDisplay(TimeValue, INode*) override
         {
             return false;
         }
 
+        // Viewport-aware isolation: suppress normal node drawing only in the
+        // target viewport and only for nodes outside the saved visible set.
         bool SuspendObjectDisplay(TimeValue, ViewExp* vpt, INode* node, Object*) override
         {
             if (!g_isolationActive.load(std::memory_order_acquire))
@@ -86,7 +96,7 @@ namespace
 
         MSTR GetName() const override
         {
-            return MSTR(_T("Alok - Isolate This Viewport"));
+            return MSTR(L"Alok - Isolate This Viewport");
         }
     };
 
@@ -113,6 +123,7 @@ namespace
 
         NodeDisplayCallback* current = control->GetNodeCallback();
 
+        // Do not take over the node-display hook while another utility owns it.
         if (current != nullptr && current != &g_callback)
             return -3;
 

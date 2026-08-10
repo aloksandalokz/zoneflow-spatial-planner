@@ -16,7 +16,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore 3ds Max 2026 SDK installer cache
+        id: sdk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}\SDK_3dsMax2026.msi
+          key: 3dsmax-2026-sdk-msi-v1
+
       - name: Download Autodesk 3ds Max 2026 SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -26,6 +34,20 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $msi
           if (!(Test-Path $msi)) { throw "SDK download failed." }
           Write-Host "Downloaded: $msi"
+
+      - name: Save SDK installer cache
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\SDK_3dsMax2026.msi
+          key: 3dsmax-2026-sdk-msi-v1
+
+      - name: Verify SDK installer
+        shell: powershell
+        run: |
+          $msi = Join-Path $env:RUNNER_TEMP "SDK_3dsMax2026.msi"
+          if (!(Test-Path $msi)) { throw "SDK installer is missing after restore/download." }
+          Get-Item $msi | Format-List FullName,Length
 
       - name: Install SDK on temporary GitHub runner
         shell: powershell
