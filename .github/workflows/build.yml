@@ -1,17 +1,19 @@
-name: Build Camera-Specific 3ds Max 2026 VP Isolate
+name: Build and Test Camera Filter - 3ds Max 2026
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - "CameraViewportIsolate.cpp"
-      - "Camera_Viewport_Isolate.py"
-      - "Launch_Camera_Viewport_Isolate.ms"
+      - "CameraPerViewportFilter.cpp"
+      - "CameraPerViewportFilterLogic.h"
+      - "CameraPerViewportFilterTests.cpp"
+      - "Camera_Filter_Isolate.py"
+      - "Launch_Camera_Filter_Isolate.ms"
       - "CMakeLists.txt"
       - ".github/workflows/build.yml"
 
 jobs:
-  build:
+  build-test-package:
     runs-on: windows-2022
 
     steps:
@@ -42,17 +44,12 @@ jobs:
           path: ${{ runner.temp }}\SDK_3dsMax2026.msi
           key: 3dsmax-2026-sdk-msi-v1
 
-      - name: Verify SDK installer
-        shell: powershell
-        run: |
-          $msi = Join-Path $env:RUNNER_TEMP "SDK_3dsMax2026.msi"
-          if (!(Test-Path $msi)) { throw "SDK installer is missing." }
-
       - name: Install SDK on temporary GitHub runner
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $msi = Join-Path $env:RUNNER_TEMP "SDK_3dsMax2026.msi"
+          if (!(Test-Path $msi)) { throw "SDK installer is missing." }
           $p = Start-Process msiexec.exe -ArgumentList @(
             "/i", "`"$msi`"", "/qn", "/norestart"
           ) -Wait -PassThru
@@ -77,9 +74,10 @@ jobs:
             }
           }
           if (-not $sdk) { throw "max.h was not found after SDK installation." }
+          Write-Host "SDK=$sdk"
           "sdk_root=$sdk" >> $env:GITHUB_OUTPUT
 
-      - name: Configure CMake
+      - name: Configure CMake against actual 2026 SDK
         shell: powershell
         run: |
           cmake -S . -B build `
@@ -87,47 +85,84 @@ jobs:
             -A x64 `
             -DMAXSDK_ROOT="${{ steps.sdk.outputs.sdk_root }}"
 
-      - name: Build Release DLL
+      - name: Build DLL and unit-test executable
         shell: powershell
         run: |
           cmake --build build --config Release --verbose
 
-      - name: Verify DLL
+      - name: Run camera-filter logic tests
         shell: powershell
         run: |
-          $dll = "build\Release\CameraViewportIsolate.dll"
-          if (!(Test-Path $dll)) { throw "CameraViewportIsolate.dll was not created." }
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Verify DLL and exported functions
+        shell: powershell
+        run: |
+          $dll = "build\Release\CameraPerViewportFilter.dll"
+          if (!(Test-Path $dll)) { throw "CameraPerViewportFilter.dll was not created." }
           Get-Item $dll | Format-List FullName,Length,LastWriteTime
 
-      - name: Package ready-to-use files
+          $dump = & dumpbin.exe /exports $dll | Out-String
+          $required = @(
+            "CameraFilter_Isolate",
+            "CameraFilter_Restore",
+            "CameraFilter_Shutdown",
+            "CameraFilter_SelfTest",
+            "CameraFilter_PreCalls",
+            "CameraFilter_FilterCalls",
+            "CameraFilter_HiddenDecisions"
+          )
+          foreach ($name in $required) {
+            if ($dump -notmatch [regex]::Escape($name)) {
+              throw "Missing DLL export: $name"
+            }
+          }
+          Write-Host "All required exports verified."
+
+      - name: Python syntax check
+        shell: powershell
+        run: |
+          python -m py_compile Camera_Filter_Isolate.py
+
+      - name: Package only after all tests pass
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path ReadyToUse | Out-Null
-          Copy-Item "build\Release\CameraViewportIsolate.dll" "ReadyToUse\"
-          Copy-Item "Camera_Viewport_Isolate.py" "ReadyToUse\"
-          Copy-Item "Launch_Camera_Viewport_Isolate.ms" "ReadyToUse\"
+          Copy-Item "build\Release\CameraPerViewportFilter.dll" "ReadyToUse\"
+          Copy-Item "Camera_Filter_Isolate.py" "ReadyToUse\"
+          Copy-Item "Launch_Camera_Filter_Isolate.ms" "ReadyToUse\"
 
           @"
-          CAMERA-SPECIFIC VIEWPORT ISOLATE — 3ds Max 2026
-          =================================================
+          CAMERA FILTER - 3ds Max 2026
+          ============================
 
-          No administrator rights required.
+          CI status before packaging:
+          - Compiled against Autodesk 3ds Max 2026 SDK
+          - Camera A / Camera B predicate tests passed
+          - DLL exports verified
+          - Python syntax check passed
 
-          1. Extract these files to a writable folder.
-          2. In 3ds Max: Scripting > Run Script.
-          3. Run Launch_Camera_Viewport_Isolate.ms.
-          4. Activate Camera A viewport and click SET THIS CAMERA.
-          5. Select objects and click ISOLATE SELECTED IN THIS CAMERA.
+          IMPORTANT:
+          GitHub CI does not contain a licensed 3ds Max application, so it cannot
+          visually open a Nitrous viewport. The DLL performs an additional native
+          self-test when the palette opens.
 
-          Camera A: selected objects only.
-          Camera B / other cameras: full scene.
+          Usage:
+          1. Fully close 3ds Max before replacing previous experimental DLLs.
+          2. Extract these files to a new folder.
+          3. Open 3ds Max 2026.
+          4. Scripting > Run Script > Launch_Camera_Filter_Isolate.ms
+          5. Click Camera A viewport > SET THIS CAMERA.
+          6. Select the objects to KEEP visible.
+          7. KEEP ONLY SELECTED IN THIS CAMERA.
 
-          Renderable / Hide / Freeze / Layer visibility are never modified.
+          Other camera viewports should remain full scene.
+          Renderable / layers / object hidden flags are not modified.
           "@ | Set-Content "ReadyToUse\README.txt"
 
-      - name: Upload ready-to-use package
+      - name: Upload tested package
         uses: actions/upload-artifact@v4
         with:
-          name: Camera-Specific-VP-Isolate-3dsMax2026-READY
+          name: Camera-Filter-3dsMax2026-TESTED
           path: ReadyToUse
           if-no-files-found: error
