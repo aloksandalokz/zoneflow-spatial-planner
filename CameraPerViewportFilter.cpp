@@ -74,8 +74,12 @@ namespace
             }
             else
             {
-                // Rect is a Box2 in the 3ds Max SDK and has no 4-int ctor.
-                rect->SetEmpty();
+                // Rect derives from the Win32 RECT type, so these fields can be
+                // assigned directly without linking GeomExport Box2 methods.
+                rect->left = 0;
+                rect->top = 0;
+                rect->right = 0;
+                rect->bottom = 0;
             }
         }
 
