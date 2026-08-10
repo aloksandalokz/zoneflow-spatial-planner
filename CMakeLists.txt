@@ -1,6 +1,5 @@
-# Repackage trigger: include latest Python diagnostics UI with corrected native DLL.
 cmake_minimum_required(VERSION 3.20)
-project(AlokViewportIsolate LANGUAGES CXX)
+project(CameraViewportIsolate LANGUAGES CXX)
 
 if(NOT MAXSDK_ROOT)
     set(MAXSDK_ROOT "C:/Program Files/Autodesk/3ds Max 2026 SDK/maxsdk"
@@ -12,42 +11,42 @@ if(NOT EXISTS "${MAXSDK_ROOT}/include/max.h")
         "3ds Max SDK not found. Set MAXSDK_ROOT to the folder containing include/max.h.")
 endif()
 
-add_library(AlokViewportIsolate SHARED
-    AlokViewportIsolate.cpp
+add_library(CameraViewportIsolate SHARED
+    CameraViewportIsolate.cpp
 )
 
-target_compile_features(AlokViewportIsolate PRIVATE cxx_std_17)
+target_compile_features(CameraViewportIsolate PRIVATE cxx_std_17)
 
-target_compile_definitions(AlokViewportIsolate PRIVATE
+target_compile_definitions(CameraViewportIsolate PRIVATE
     UNICODE
     _UNICODE
     NOMINMAX
 )
 
 if(MSVC)
-    set_property(TARGET AlokViewportIsolate PROPERTY
+    set_property(TARGET CameraViewportIsolate PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-    target_compile_options(AlokViewportIsolate PRIVATE
+    target_compile_options(CameraViewportIsolate PRIVATE
         /permissive-
         /EHsc
         /U_MBCS
     )
 endif()
 
-target_include_directories(AlokViewportIsolate PRIVATE
+target_include_directories(CameraViewportIsolate PRIVATE
     "${MAXSDK_ROOT}/include"
 )
 
-target_link_directories(AlokViewportIsolate PRIVATE
+target_link_directories(CameraViewportIsolate PRIVATE
     "${MAXSDK_ROOT}/lib"
     "${MAXSDK_ROOT}/lib/x64/Release"
 )
 
-target_link_libraries(AlokViewportIsolate PRIVATE
+target_link_libraries(CameraViewportIsolate PRIVATE
     core.lib
     maxutil.lib
 )
 
-set_target_properties(AlokViewportIsolate PROPERTIES
-    OUTPUT_NAME "AlokViewportIsolate"
+set_target_properties(CameraViewportIsolate PROPERTIES
+    OUTPUT_NAME "CameraViewportIsolate"
 )
