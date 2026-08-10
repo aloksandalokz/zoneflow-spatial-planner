@@ -98,11 +98,23 @@ jobs:
       - name: Verify DLL and exported functions
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
           $dll = "build\Release\CameraPerViewportFilter.dll"
           if (!(Test-Path $dll)) { throw "CameraPerViewportFilter.dll was not created." }
           Get-Item $dll | Format-List FullName,Length,LastWriteTime
 
-          $dump = & dumpbin.exe /exports $dll | Out-String
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (!(Test-Path $vswhere)) { throw "vswhere.exe not found." }
+          $vsroot = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsroot) { throw "Visual Studio C++ installation not found." }
+
+          $dumpbinFile = Get-ChildItem (Join-Path $vsroot "VC\Tools\MSVC") -Filter dumpbin.exe -Recurse -ErrorAction Stop |
+            Where-Object { $_.FullName -match 'Hostx64\\x64\\dumpbin\.exe$' } |
+            Select-Object -First 1
+          if (-not $dumpbinFile) { throw "dumpbin.exe not found in Visual Studio installation." }
+
+          Write-Host "Using dumpbin: $($dumpbinFile.FullName)"
+          $dump = & $dumpbinFile.FullName /exports $dll | Out-String
           $required = @(
             "CameraFilter_Isolate",
             "CameraFilter_Restore",
