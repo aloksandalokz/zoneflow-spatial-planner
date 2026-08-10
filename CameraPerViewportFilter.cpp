@@ -69,9 +69,14 @@ namespace
         {
             if (rect == nullptr) return;
             if (vpt != nullptr)
+            {
                 *rect = vpt->GetDammageRect();
+            }
             else
-                *rect = Rect(0, 0, 0, 0);
+            {
+                // Rect is a Box2 in the 3ds Max SDK and has no 4-int ctor.
+                rect->SetEmpty();
+            }
         }
 
         BOOL Foreground() override
