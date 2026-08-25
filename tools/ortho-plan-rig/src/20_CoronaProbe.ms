@@ -1,29 +1,70 @@
 /* AOPR 20_CoronaProbe.ms - deliberately independent of rig logic */
 
-fn AOPR_CoronaAvailable =
+global AOPR_CORONA_CAMERA_CLASS = undefined
+
+fn AOPR_FindCoronaCameraClass =
 (
-    local ok = false
-    try
+    if AOPR_CORONA_CAMERA_CLASS != undefined then AOPR_CORONA_CAMERA_CLASS
+    else
     (
-        local c = CoronaCam()
-        ok = (c != undefined)
-        if c != undefined do delete c
+        local classes = #()
+        local exactMatch = undefined
+        local fallbackMatch = undefined
+
+        try (classes = camera.classes) catch (classes = #())
+
+        for cls in classes do
+        (
+            local n = toLower (cls as string)
+
+            if n == "coronacam" do exactMatch = cls
+
+            if fallbackMatch == undefined do
+            (
+                local hasCorona = (findString n "corona") != undefined
+                local looksCamera = ((findString n "cam") != undefined) or ((findString n "camera") != undefined)
+                if hasCorona and looksCamera do fallbackMatch = cls
+            )
+        )
+
+        local found = if exactMatch != undefined then exactMatch else fallbackMatch
+
+        if found != undefined do
+        (
+            try (pluginManager.loadClass found) catch()
+            AOPR_CORONA_CAMERA_CLASS = found
+        )
+
+        found
     )
-    catch()
-    ok
 )
 
 fn AOPR_CreateCoronaCamera camName =
 (
     local cam = undefined
-    try (cam = CoronaCam()) catch()
-    if cam != undefined do
+    local cls = AOPR_FindCoronaCameraClass()
+
+    if cls != undefined do
+    (
+        try (pluginManager.loadClass cls) catch()
+        try (cam = cls()) catch (cam = undefined)
+    )
+
+    if AOPR_IsValidNode cam do
     (
         try (cam.targeted = false) catch()
         try (cam.name = camName) catch()
         try (cam.wirecolor = AOPR_GREEN) catch()
     )
     cam
+)
+
+fn AOPR_CoronaAvailable =
+(
+    local c = AOPR_CreateCoronaCamera "AOPR_CORONA_AVAILABILITY_TEST"
+    local ok = AOPR_IsValidNode c
+    if ok do try (delete c) catch()
+    ok
 )
 
 fn AOPR_ProjectionStateFromViewport cam =
@@ -91,10 +132,24 @@ fn AOPR_DumpCoronaProbe path =
     AOPR_Log ("AOPR Corona Probe - " + AOPR_VERSION)
     AOPR_Log ("3ds Max version: " + (maxVersion() as string))
 
-    local cam = AOPR_CreateCoronaCamera "AOPR_PROBE_TEMP"
-    if cam == undefined then
+    local cls = AOPR_FindCoronaCameraClass()
+    AOPR_Log ("Corona camera MAXClass: " + (cls as string))
+
+    if cls == undefined do
     (
-        AOPR_Log "FAIL: CoronaCam() constructor unavailable."
+        AOPR_Log "FAIL: No Corona camera class found in camera.classes."
+        AOPR_Log "--- REGISTERED CAMERA CLASSES ---"
+        local allClasses = #()
+        try (allClasses = camera.classes) catch()
+        for c in allClasses do AOPR_Log (c as string)
+        AOPR_WriteLog path
+        return false
+    )
+
+    local cam = AOPR_CreateCoronaCamera "AOPR_PROBE_TEMP"
+    if not (AOPR_IsValidNode cam) then
+    (
+        AOPR_Log "FAIL: Corona camera MAXClass was found, but instantiation failed."
         AOPR_WriteLog path
         false
     )
@@ -111,8 +166,8 @@ fn AOPR_DumpCoronaProbe path =
         for p in props do
         (
             local value = AOPR_SafeGet cam p
-            local cls = if value == undefined then "undefined" else ((classOf value) as string)
-            AOPR_Log ((p as string) + " | " + cls + " | " + (value as string))
+            local clsValue = if value == undefined then "undefined" else ((classOf value) as string)
+            AOPR_Log ((p as string) + " | " + clsValue + " | " + (value as string))
         )
 
         AOPR_Log "--- PROJECTION CANDIDATES ---"
@@ -122,5 +177,6 @@ fn AOPR_DumpCoronaProbe path =
 
         try (delete cam) catch()
         AOPR_WriteLog path
+        true
     )
 )
